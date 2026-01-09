@@ -17,6 +17,7 @@ parquet/deltalakes.
 ## Parameters
 
 - Partition key (post root ID, pre root ID, synapse ID, etc)
+- Compression scheme details
 - Number of partitions (0 partitions ~= a parquet file)
 - Bloom filters
 - File size
