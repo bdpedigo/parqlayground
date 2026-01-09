@@ -41,3 +41,4 @@ Example queries to test and time (querying from the cloud):
 - Get all synapses among ~100 root IDs
 - Get the mean postsynapse size for a root ID
 - Get the connections among cells with nuclei
+- Get all synapses in a bounding box
