@@ -26,6 +26,7 @@ parquet/deltalakes.
 ### Storage size
 
 - Total size of the combined tables on cloud storage
+  - Does it make sense to measure total size say over 3 materialization versions here?
 
 ### Query time
 
