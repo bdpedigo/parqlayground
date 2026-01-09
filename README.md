@@ -8,6 +8,8 @@ parquet/deltalakes.
 - Store a single delta table per materialization version, making a new one each time.
 - Store a delta table of synapse ID, spatial info. Store a separate one for segmentation
   info with synapse ID also. Join as needed.
+- Store a delta table of synapse ID, spatial info. Store a separate one for both pre and
+  postsynaptic segmentation info with synapse ID also. Join as needed.
 - Store a single delta table, append columns per new materialization version as needed.
 - Store a single delta table, but as segmentation changes, update rows. Use delta lake versioning
   to access prior versions.
