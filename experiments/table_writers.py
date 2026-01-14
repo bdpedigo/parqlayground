@@ -66,7 +66,7 @@ currtime = time.time()
 table = (
     table.rename({"synapse_id": "id"})
     .select(ALL_COLS)
-    .slice(0, 10_000_000)
+    .slice(0, 20_000_000)
     # .filter(
     #     pl.col("pre_pt_root_id").is_in(root_table["pt_root_id"].to_list())
     #     | pl.col("post_pt_root_id").is_in(root_table["pt_root_id"].to_list())
@@ -110,16 +110,26 @@ print(f"{time.time() - currtime:.3f} seconds elapsed.")
 
 
 wp = WriterProperties(
-    compression="ZSTD",
-    compression_level=3,
+    # compression="ZSTD",
+    compression=None,
+    # compression_level=3,
 )
+# partition_by = ["id_partition"]
 
 
 def write_table(table: Union[pl.LazyFrame, pl.DataFrame], out_path: Union[str, Path]):
     if isinstance(table, pl.LazyFrame):
         table = table.collect(engine="streaming")
 
-    write_deltalake(str(out_path), table, mode="append", writer_properties=wp)
+    # table = table.with_columns((pl.col("id") // 64).alias("id_partition"))
+
+    write_deltalake(
+        str(out_path),
+        table,
+        mode="append",
+        writer_properties=wp,
+        # partition_by=partition_by,
+    )
 
 
 def upsert_table(
@@ -136,9 +146,19 @@ def upsert_table(
             target_alias="target",
             writer_properties=wp,
         )
-        .when_matched_update_all()
+        # .when_matched_update_all()
+        .when_matched_update(
+            updates={
+                "pre_pt_root_id": "source.pre_pt_root_id",
+                "post_pt_root_id": "source.post_pt_root_id",
+            },
+            predicate="target.id = source.id",
+        )
+        # .when_matched_delete("target.id = source.id")
         .execute()
     )
+    # dt.update
+    # write_deltalake(str(out_path), new_table, mode="append", writer_properties=wp)
 
     return dt.version()
 
@@ -246,6 +266,9 @@ for last_version, current_version in zip(versions[:-1], versions[1:]):
     delta_version = upsert_table(update_table, out_path)
     delta_rows_version_map[current_version] = delta_version
 
+# -----------
+# dumb_delta_rows - just add a new column "version" to identify version for each row
+
 # dt = DeltaTable(str(out_path))
 # to = TableOptimizer(dt)
 # to.compact()
@@ -309,6 +332,7 @@ def get_dir_size(path: Union[str, LocalPath]) -> int:
     return total_size
 
 
+size_rows = []
 dirs_by_method = {
     "naive_copy": [f"naive_copy_v{v}" for v in versions],
     "split_seg": ["fixed_table"] + [f"dynamic_table_v{v}" for v in versions],
@@ -326,14 +350,24 @@ for method, dir_names in dirs_by_method.items():
         dir_path = base_out_path / dir_name  # ty: ignore
         dir_size = get_dir_size(dir_path)
         total_size += dir_size
-    print(f"{method}: {total_size / (1000**3):.3f} GiB")
+    print(f"{method}: {total_size / (1000**3):.3f} gb")
 
+    size_rows.append({"method": method, "size_gb": total_size / (1000**3)})
+
+size_results = pl.DataFrame(size_rows)
 # %%
 
 pl.read_delta(
     "/Users/ben.pedigo/code/parqlayground/parqlayground/data/write_out_test/delta_rows",
     version=1,
 ).filter(pl.col("id") == 203270208).select("post_pt_root_id")
+
+# %%
+
+dt = DeltaTable(
+    "/Users/ben.pedigo/code/parqlayground/parqlayground/data/write_out_test/delta_rows"
+)
+dt.history()
 
 # %%
 
@@ -497,7 +531,7 @@ def query_induced_connections_by_root_id_group(
 
 # %%
 
-table = table.with_columns(
+base_table = table.with_columns(
     pl.col(f"post_pt_root_id_v{base_version}").alias("post_pt_root_id"),
     pl.col(f"pre_pt_root_id_v{base_version}").alias("pre_pt_root_id"),
 )
@@ -518,7 +552,7 @@ rows = []
 
 # query single synapses by id
 n_trials = 10
-select_synapse_ids = table.select("id").sample(n_trials, seed=seed).to_series()
+select_synapse_ids = base_table.select("id").sample(n_trials, seed=seed).to_series()
 for method, scanner in tqdm(
     method_scanners.items(), total=len(method_scanners), desc="single_synapse_by_id"
 ):
@@ -544,7 +578,7 @@ for method, scanner in tqdm(
 n_trials = 10
 n_synapses_per_query = 100
 select_synapse_sets = [
-    table.select("id").sample(n_synapses_per_query).to_series().to_list()
+    base_table.select("id").sample(n_synapses_per_query).to_series().to_list()
     for _ in range(n_trials)
 ]
 for method, scanner in tqdm(
@@ -570,8 +604,12 @@ for method, scanner in tqdm(
 
 # query post synapses by root id
 n_trials = 10
-select_root_ids = table.select("post_pt_root_id").unique().sample(n_trials).to_series()
-for method, scanner in tqdm(method_scanners.items(), total=len(method_scanners)):
+select_root_ids = (
+    base_table.select("post_pt_root_id").unique().sample(n_trials).to_series()
+)
+for method, scanner in tqdm(
+    method_scanners.items(), total=len(method_scanners), desc="post_synapses_by_root_id"
+):
     for version in versions:
         scanned_version_table = scanner(version)
         for i, root_id in enumerate(select_root_ids):
@@ -592,7 +630,9 @@ for method, scanner in tqdm(method_scanners.items(), total=len(method_scanners))
 
 # query pre synapses by root id
 n_trials = 10
-select_root_ids = table.select("pre_pt_root_id").unique().sample(n_trials).to_series()
+select_root_ids = (
+    base_table.select("pre_pt_root_id").unique().sample(n_trials).to_series()
+)
 for method, scanner in tqdm(
     method_scanners.items(), total=len(method_scanners), desc="pre_synapses_by_root_id"
 ):
@@ -616,7 +656,9 @@ for method, scanner in tqdm(
 
 # query post synapses mean size by root_id
 n_trials = 10
-select_root_ids = table.select("post_pt_root_id").unique().sample(n_trials).to_series()
+select_root_ids = (
+    base_table.select("post_pt_root_id").unique().sample(n_trials).to_series()
+)
 for method, scanner in tqdm(
     method_scanners.items(),
     total=len(method_scanners),
@@ -644,7 +686,9 @@ for method, scanner in tqdm(
 
 # query pre synapses mean size by root_id
 n_trials = 10
-select_root_ids = table.select("pre_pt_root_id").unique().sample(n_trials).to_series()
+select_root_ids = (
+    base_table.select("pre_pt_root_id").unique().sample(n_trials).to_series()
+)
 for method, scanner in tqdm(
     method_scanners.items(),
     total=len(method_scanners),
@@ -674,7 +718,7 @@ for method, scanner in tqdm(
 n_trials = 10
 n_roots_per_query = 100
 select_root_id_sets = [
-    table.select("post_pt_root_id")
+    base_table.select("post_pt_root_id")
     .unique()
     .sample(n_roots_per_query)
     .to_series()
@@ -710,7 +754,7 @@ for method, scanner in tqdm(
 n_trials = 10
 n_roots_per_query = 100
 select_root_id_sets = [
-    table.select("pre_pt_root_id")
+    base_table.select("pre_pt_root_id")
     .unique()
     .sample(n_roots_per_query)
     .to_series()
@@ -744,7 +788,7 @@ for method, scanner in tqdm(
 n_trials = 10
 n_roots_per_query = 100
 select_root_id_sets = [
-    table.select("post_pt_root_id")
+    base_table.select("post_pt_root_id")
     .unique()
     .sample(n_roots_per_query)
     .to_series()
@@ -780,7 +824,7 @@ for method, scanner in tqdm(
 n_trials = 10
 n_roots_per_query = 100
 select_root_id_sets = [
-    table.select("post_pt_root_id")
+    base_table.select("post_pt_root_id")
     .unique()
     .sample(n_roots_per_query)
     .to_series()
@@ -864,7 +908,92 @@ for task in result_table["task"].unique():
     ax.set_xticklabels(ax.get_xticklabels(), rotation=45, ha="right")
 
 # %%
-meta_result_table = result_table.group_by(["method", "task"]).agg(
+result_table_by_method_task = result_table.group_by(["method", "task"]).agg(
     pl.col("query_time_sec").mean().alias("mean_query_time_sec"),
 )
+mean_result_table_by_method = (
+    result_table_by_method_task.group_by("method")
+    .agg(pl.col("mean_query_time_sec").mean().alias("overall_mean_query_time_sec"))
+    .sort("overall_mean_query_time_sec")
+)
 
+fig, ax = plt.subplots(figsize=(12, 6))
+sns.stripplot(
+    data=result_table_by_method_task,
+    x="method",
+    hue="task",
+    dodge=True,
+    order=mean_result_table_by_method["method"].to_list(),
+    y="mean_query_time_sec",
+    jitter=True,
+    ax=ax,
+    legend=False,
+)
+sns.stripplot(
+    data=mean_result_table_by_method,
+    x="method",
+    order=mean_result_table_by_method["method"].to_list(),
+    y="overall_mean_query_time_sec",
+    color="black",
+    size=60,
+    marker="_",
+    linewidth=3,
+    ax=ax,
+    legend=False,
+)
+ax.set_title("Overall Mean Query Time by Method")
+ax.set(ylim=(0, None))
+
+# %%
+
+fig, ax = plt.subplots(figsize=(12, 6))
+
+method_order = (
+    result_table.group_by("method")
+    .agg(pl.col("query_time_sec").mean().alias("mean_query_time_sec"))
+    .sort("mean_query_time_sec")["method"]
+    .to_list()
+)
+
+task_order = (
+    result_table.group_by("task")
+    .agg(pl.col("query_time_sec").mean().alias("mean_query_time_sec"))
+    .sort("mean_query_time_sec")["task"]
+    .to_list()
+)
+
+sns.stripplot(
+    data=result_table,
+    x="method",
+    hue="task",
+    order=method_order,
+    hue_order=task_order,
+    dodge=True,
+    y="query_time_sec",
+    jitter=True,
+    ax=ax,
+)
+sns.move_legend(
+    ax,
+    "upper left",
+    bbox_to_anchor=(1.0, 1),
+    title="Task",
+    frameon=True,
+)
+
+# rotate x labels
+ax.set_xticks(ax.get_xticks())
+ax.set_xticklabels(ax.get_xticklabels(), rotation=45, ha="right")
+
+fig, ax = plt.subplots(figsize=(12, 6))
+
+sns.barplot(
+    data=size_results,
+    x="method",
+    y="size_gb",
+    order=method_order,
+    ax=ax,
+)
+# rotate x labels
+ax.set_xticks(ax.get_xticks())
+ax.set_xticklabels(ax.get_xticklabels(), rotation=45, ha="right")
